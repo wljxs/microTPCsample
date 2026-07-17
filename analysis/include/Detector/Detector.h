@@ -1,0 +1,88 @@
+#pragma once
+
+#include "Algorithm/IAlgorithm.h"
+#include "Config.h"
+#include "Event/DataModel.h"
+#include "Detector/BadStripMask.h"
+#include <map>
+
+class Detector {
+   public:
+    enum class Role {
+        Tracker,
+        DUT,
+        DeConv,
+        Ignored
+    };
+    Detector(int id, const std::string& name, const json& config);
+    virtual ~Detector() = default;
+
+    bool isDUT() const { return m_role == Role::DUT; }
+    bool isTracker() const { return m_role == Role::Tracker; }
+    bool isDeConv() const { return m_role == Role::DeConv; }
+
+    int GetID() const { return m_id; }
+    std::string GetName() const { return m_name; }
+
+    // Bad strip mask (optional)
+    const BadStripMask* GetBadStripMask() const { return m_badStripMask.get(); }
+
+    TVector3 GetPos() const { return m_pos + m_alignPos; }
+    TVector3 GetRot() const { return m_rot + m_alignRot; }
+    TVector3 GetAlignPos() const { return m_alignPos; }
+    TVector3 GetAlignRot() const { return m_alignRot; }
+
+    void SetPos(const TVector3& pos) { m_pos = pos; } 
+    void SetRot(const TVector3& rot) { m_rot = rot; }
+    void SetAlignment(double dx, double dy, double dz,
+                      double dRotX, double dRotY, double dRotZ) {
+        m_alignPos.SetXYZ(dx, dy, dz);
+        m_alignRot.SetXYZ(dRotX, dRotY, dRotZ);
+    }
+    const planarConfig& getConfig() const { return m_config; }
+
+    // Coordinate Transform
+    TVector3 LocalToGlobal(const TVector3& localPos) const;
+    TVector3 GlobalToLocal(const TVector3& globalPos) const;
+    TVector3 GlobalDirToLocal(const TVector3& globalDir) const;
+
+    // Specific Detector Geometry
+    virtual TVector3 CalcHitFromTrack(const Track& track) const = 0;
+    virtual std::vector<LocalHit> CalcLocalHitsFromClusters(const std::vector<Cluster>& clusters) const = 0;
+
+    // 算法相关接口
+    template <typename T>
+    std::shared_ptr<T> GetAlgorithm(const std::string& name) const {
+        auto it = m_algorithms.find(name);
+        if (it == m_algorithms.end()) {
+            throw std::runtime_error("Algorithm '" + name + "' not found in detector " + m_name);
+        }
+        auto algo = it->second;
+
+        auto casted = std::dynamic_pointer_cast<T>(algo);
+        if (!casted) {
+            throw std::runtime_error("Algorithm type mismatch for: " + name);
+        }
+        return casted;
+    }
+
+   protected:
+    TVector3 m_pos;
+    TVector3 m_rot;
+    TVector3 m_alignPos = TVector3(0, 0, 0);
+    TVector3 m_alignRot = TVector3(0, 0, 0);
+
+    // 算法实例
+    std::map<std::string, std::shared_ptr<IAlgorithm>> m_algorithms;
+
+    // 坏道掩码（可选）
+    std::shared_ptr<BadStripMask> m_badStripMask;
+
+
+   protected:
+    int m_id;
+    std::string m_name;
+    Role m_role;
+
+    planarConfig m_config;
+};

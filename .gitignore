@@ -1,0 +1,23 @@
+# ROOT data and generated analysis output
+*.root
+
+# CMake build products
+**/build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+# Editor and language-server caches
+**/.cache/
+.vscode/
+
+# Local mesh/field data directories
+simulation/microTPC5mmone/
+simulation/microTPC5mmsmall/
+
+# Common local/temporary files
+*.swp
+*~
+.DS_Store
