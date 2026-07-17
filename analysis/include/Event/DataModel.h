@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TVector3.h"
+#include <limits>
 #include <map>
 #include <memory>
 
@@ -114,4 +115,6 @@ struct ClusterDeconv{//一下的斜率，截距的y方向都是基于条的
     bool isBad = false;
     double chargeposition; //电荷重心位置
     double microTPCposition; //得到的打到微TPC的重心位置
+    std::vector<double> tierResiduals; // 每层位置残差 [mm]；无有效层时为 +inf
+    double microTPCResidual = std::numeric_limits<double>::infinity(); // microTPC 位置残差 [mm]
 };

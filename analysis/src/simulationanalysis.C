@@ -511,8 +511,20 @@ int main(){//分析模拟数据
       }
       ClusterDeconvs.clear();
       std::vector<ClusterDeconv> ClusterDeconvs_one[2];
-      for(const auto& cluster : vec_ClusterDeconv_temp) {
+      for(auto& cluster : vec_ClusterDeconv_temp) {
         if (!cluster.isValid) continue;
+        cluster.tierResiduals.assign(n_tier, std::numeric_limits<double>::infinity());
+        for (int tier = 0; tier < n_tier; ++tier) {
+          if (!std::isfinite(cluster.pos[tier])) continue;
+          cluster.tierResiduals[tier] = cluster.pos[tier] * 0.4 + 0.2
+              - b[cluster.type] * 10.0
+              - k[cluster.type] * thickness / n_tier * (tier + 0.5);
+        }
+        if (std::isfinite(cluster.microTPCposition)) {
+          cluster.microTPCResidual = cluster.microTPCposition * 0.4 + 0.2
+              - b[cluster.type] * 10.0
+              - k[cluster.type] * thickness / 2.0;
+        }
         ClusterDeconvs.push_back(cluster);
         clusternum[cluster.type]++;
         ClusterDeconvs_one[cluster.type].push_back(cluster);
@@ -522,11 +534,9 @@ int main(){//分析模拟数据
       if (clusternum[0] == 1) {
         const ClusterDeconv &clusterX = ClusterDeconvs_one[0][0];
         for (int tier = 0; tier < n_tier; ++tier) {
-          if (!std::isfinite(clusterX.pos[tier])) continue;
-          const double res = clusterX.pos[tier] * 0.4 + 0.2
-              - b[0] * 10.0
-              - k[0] * thickness / n_tier * (tier + 0.5);
-          h_res_xonly[tier]->Fill(res);
+          if (std::isfinite(clusterX.tierResiduals[tier])) {
+            h_res_xonly[tier]->Fill(clusterX.tierResiduals[tier]);
+          }
         }
       }
 
@@ -561,15 +571,17 @@ int main(){//分析模拟数据
             ClusterDeconv cluster = ClusterDeconvs_one[type][i];
 
             // 计算残差并填充直方图
-            h_res_microTPC[cluster.type]->Fill(cluster.microTPCposition*0.4+0.2-b[cluster.type]*10-k[cluster.type]*thickness/2);//0.2是第0个strip的bias
+            if (std::isfinite(cluster.microTPCResidual)) {
+              h_res_microTPC[cluster.type]->Fill(cluster.microTPCResidual);
+            }
             h_res_angle[cluster.type]->Fill(cluster.k*0.4-k[cluster.type]);
 
             for(int tier = 0; tier < n_tier; ++tier) {
-              if(cluster.pos[tier] == std::numeric_limits<double>::infinity()) {
+              const double res = cluster.tierResiduals[tier];
+              if (!std::isfinite(res)) {
                 res_arr[cluster.type][tier].push_back(std::numeric_limits<double>::infinity());
                 continue;
               }
-              double res = cluster.pos[tier]*0.4+0.2-b[cluster.type]*10-k[cluster.type]*thickness/n_tier*(tier+0.5);//0.2是第0个strip的bias
               gr_position->SetPoint(gr_position->GetN(), cluster.pos[tier]+0.5, thickness/n_tier*(tier+0.5));
               gr_position->SetPointError(gr_position->GetN(), sqrt(thickness/n_tier*(tier+0.5)/cluster.chargetier[tier]*1000), 0);
               res_arr[cluster.type][tier].push_back(res);
@@ -610,16 +622,14 @@ int main(){//分析模拟数据
             leg->SetHeader(Form("Event %d  #color[4]{#bullet} pred  #color[2]{line} true", event), "C");
             for(int tier = 0; tier < n_tier; ++tier) {
               if (c.pos[tier] != std::numeric_limits<double>::infinity()) {
-                double res = c.pos[tier]*0.4+0.2-b[c.type]*10-k[c.type]*thickness/n_tier*(tier+0.5);
-                leg->AddEntry((TObject*)0, Form("Tier%d res = %.3f mm", tier, res), "");
+                leg->AddEntry((TObject*)0, Form("Tier%d res = %.3f mm", tier, c.tierResiduals[tier]), "");
               } else {
                 leg->AddEntry((TObject*)0, Form("Tier%d: no data", tier), "");
               }
             }
             double ang_diff = c.k*0.4-k[c.type];
             leg->AddEntry((TObject*)0, Form("#Deltak = %.4f (pred %.4f vs true %.4f)", ang_diff, c.k*0.4, k[c.type]), "");
-            double mtpc_res = c.microTPCposition*0.4+0.2-b[c.type]*10-k[c.type]*thickness/2;
-            leg->AddEntry((TObject*)0, Form("microTPC res = %.3f mm", mtpc_res), "");
+            leg->AddEntry((TObject*)0, Form("microTPC res = %.3f mm", c.microTPCResidual), "");
             leg->Draw();
           }
           dir_charge_one[type]->WriteTObject(c_compare);
