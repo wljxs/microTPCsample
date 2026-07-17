@@ -27,6 +27,8 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <limits>
 #include <random>
 #include <string>
 
@@ -66,10 +68,13 @@ int main(int argc, char *argv[])
 {
     // ---------- 参数 ----------
     int runid = (argc > 1) ? std::atoi(argv[1]) : 0;
+    const std::string outputFile = (argc > 2)
+        ? argv[2] : "../result/nodelta/20test.root";
 
     std::string detector = "microTPC5mmone";
     constexpr double pitch = 0.04;
-    constexpr unsigned int nEvents = 400;
+    const unsigned int nEvents = (argc > 3)
+        ? static_cast<unsigned int>(std::max(1, std::atoi(argv[3]))) : 5000;
     constexpr int N_STRIPS = 20;                 // x/y 方向各 20 条
     constexpr double trackAngle = 20;         // 入射角（度，相对于垂直方向）
     constexpr double trackAngleRad = trackAngle * M_PI / 180.0;
@@ -107,6 +112,13 @@ int main(int argc, char *argv[])
         gLib_ymax  = ymax;
         gLib_nbins = nbins;
         gLib_t     = *meta_t;
+
+        if (gLib_nbins != kNbins) {
+            std::cerr << "Error: sample library nbins=" << gLib_nbins
+                      << " does not match compiled kNbins=" << kNbins << std::endl;
+            fLib->Close();
+            return 1;
+        }
 
         std::cout << "[loadSampleLibrary] Binning: nbins=" << nbins
                   << "  x=[" << xmin << ", " << xmax << "]"
@@ -194,7 +206,11 @@ int main(int argc, char *argv[])
     drift.SetDistanceSteps(1.e-3);
 
     // ---------- 输出 Tree ----------
-    TFile *fout = new TFile("../raw/nodelta/20test.root", "RECREATE");
+    TFile *fout = new TFile(outputFile.c_str(), "RECREATE");
+    if (!fout || fout->IsZombie()) {
+        std::cerr << "Error: Cannot create output file " << outputFile << std::endl;
+        return 1;
+    }
 
     int event;
     // 时间轴
@@ -252,6 +268,19 @@ int main(int argc, char *argv[])
     tinit->Branch("ee0",          &vec_ee0);
     tinit->Branch("xe0_stripid",  &vec_xe0_stripid);
     tinit->Branch("ye0_stripid",  &vec_ye0_stripid);
+
+    // 统计漂移终点到抽样库的接受率，便于检查 (ix, iy) 是否越界。
+    Long64_t nPrimary = 0;
+    Long64_t nDriftSuccess = 0;
+    Long64_t nReadoutInRange = 0;
+    Long64_t nLibraryOutOfRange = 0;
+    Long64_t nEmptyRegion = 0;
+    Long64_t nSampledElectrons = 0;
+    // 性能统计：区分 Garfield 漂移、ROOT 模板读取/叠加和电子学卷积。
+    double driftSeconds = 0.;
+    double librarySeconds = 0.;
+    double convolutionSeconds = 0.;
+    const auto eventLoopStart = std::chrono::steady_clock::now();
     // ==================== 事件循环 ====================
     track.DisableDeltaElectronTransport();
     for (unsigned int i = 0; i < nEvents; ++i) {
@@ -279,7 +308,7 @@ int main(int argc, char *argv[])
         double z0 = 0.49;   // 从探测器顶部附近开始
         double t0 = 0.;
         
-        // —— track 方向：入射角 20°（相对于垂直 z 方向，在 x-z 平面内） ——
+        // —— track 方向：入射角 20°（相对于垂直 z 方向，在 y-z 平面内） ——
         double dx = 0.;
         double dy = std::sin(trackAngleRad);
         double dz = -std::cos(trackAngleRad);  // 向下
@@ -305,6 +334,7 @@ int main(int argc, char *argv[])
             for (int ie = 0; ie < ne; ++ie) {
                 double xe0, ye0, ze0, te0, ee0,dxe, dye, dze;
                 track.GetElectron(ie, xe0, ye0, ze0, te0, ee0, dxe, dye, dze);
+                ++nPrimary;
                 
                 // —— 记录初始电离位置（tree3） ——
                 vec_xe0.push_back(xe0);
@@ -316,7 +346,10 @@ int main(int argc, char *argv[])
                 vec_ye0_stripid.push_back((int)(ye0 / pitch));
                 
                 // 漂移模拟
+                const auto driftStart = std::chrono::steady_clock::now();
                 drift.DriftElectron(xe0, ye0, ze0, te0, ee0);
+                driftSeconds += std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - driftStart).count();
                 
                 int status;
                 double xe1, ye1, ze1, te1;
@@ -327,6 +360,7 @@ int main(int argc, char *argv[])
                     // 漂移失败，跳过
                     continue;
                 }
+                ++nDriftSuccess;
                 
                 // 计算 strip 编号
                 int xe_stripid = (int)(xe1 / pitch);
@@ -335,6 +369,7 @@ int main(int argc, char *argv[])
                 // 边界检查
                 if(xe_stripid < 0 || xe_stripid >= N_STRIPS ||
                    ye_stripid < 0 || ye_stripid >= N_STRIPS) continue;
+                ++nReadoutInRange;
                 
                 // 记录每个电子的终点（tree2）
                 vec_xe1.push_back(xe1);
@@ -347,7 +382,6 @@ int main(int argc, char *argv[])
                 
                 // —— 区域映射（与 microTPCsample.C 一致） ——
                 double deltax = gLib_xmax - gLib_xmin;
-                double deltay = gLib_ymax - gLib_ymin;
                 double binWx = (gLib_xmax - gLib_xmin) / gLib_nbins;
                 double binWy = (gLib_ymax - gLib_ymin) / gLib_nbins;
                 int ix, iy;
@@ -375,11 +409,18 @@ int main(int argc, char *argv[])
                 iy = (int)((std::fmod(ye1, pitch)) / binWy);
                 
                 // 边界检查
-                if(ix < 0 || ix >= gLib_nbins || iy < 0 || iy >= gLib_nbins) continue;
+                if(ix < 0 || ix >= gLib_nbins || iy < 0 || iy >= gLib_nbins) {
+                    ++nLibraryOutOfRange;
+                    continue;
+                }
                 
                 // —— 从抽样库获取信号 ——
-                if (!regionTrees[ix][iy] || region_n[ix][iy] == 0) continue;
+                if (!regionTrees[ix][iy] || region_n[ix][iy] == 0) {
+                    ++nEmptyRegion;
+                    continue;
+                }
                 
+                const auto libraryStart = std::chrono::steady_clock::now();
                 Long64_t entry_choose = rnd.Integer(region_n[ix][iy]);
                 regionTrees[ix][iy]->GetEntry(entry_choose);
                 
@@ -407,12 +448,24 @@ int main(int argc, char *argv[])
                 
                 // 浮点索引 + 线性插值，解决 te1 不是 tstep 整数倍时的截断误差
                 double fracBegin = te1 / tstep;
-                int    beginindex = (int)fracBegin;
+                int    beginindex = (int)std::floor(fracBegin);
                 double alpha      = fracBegin - beginindex;
                 double w0 = 1.0 - alpha, w1 = alpha;
 
-                // 抽样库信号长度（信号5在两种分支中都被检查过，一定非空）
-                int libSize = (int)region_sig[ix][iy][5]->size();
+                if (beginindex < 0 || beginindex >= static_cast<int>(nTimeBins)) continue;
+
+                // 所有实际使用的通道必须具有同一段可插值的有效长度。
+                int libSize = std::numeric_limits<int>::max();
+                const int xFirst = iscenter ? 2 : 0;
+                const int xLast = iscenter ? 4 : 1;
+                for (int is = xFirst; is <= xLast; ++is) {
+                    libSize = std::min(libSize, static_cast<int>(region_sig[ix][iy][is]->size()));
+                }
+                for (int is = 5; is <= 7; ++is) {
+                    libSize = std::min(libSize, static_cast<int>(region_sig[ix][iy][is]->size()));
+                }
+                if (libSize < 2) continue;
+                ++nSampledElectrons;
 
                 for (int k = beginindex; k < nTimeBins; ++k) {
                     int j = k - beginindex;               // 库内索引
@@ -423,7 +476,7 @@ int main(int argc, char *argv[])
                         for(int indexx = stripidx-1; indexx <= stripidx+1; ++indexx) {
                             double val = w0 * region_sig[ix][iy][signalidx]->at(j)
                                     + w1 * region_sig[ix][iy][signalidx]->at(j+1);
-                            vec_sigx[indexx][k] += val;
+                            if (indexx >= 0 && indexx < N_STRIPS) vec_sigx[indexx][k] += val;
                             signalidx++;
                         }
                     }
@@ -432,7 +485,7 @@ int main(int argc, char *argv[])
                         for(int indexx = stripidx-isleft; indexx <= stripidx-isleft+1; ++indexx) {
                             double val = w0 * region_sig[ix][iy][signalidx]->at(j)
                                     + w1 * region_sig[ix][iy][signalidx]->at(j+1);
-                            vec_sigx[indexx][k] += val;
+                            if (indexx >= 0 && indexx < N_STRIPS) vec_sigx[indexx][k] += val;
                             signalidx++;
                         }
                     }
@@ -440,19 +493,22 @@ int main(int argc, char *argv[])
                     for(int indexy = stripidy-1; indexy <= stripidy+1; ++indexy) {
                         double val = w0 * region_sig[ix][iy][signalidy]->at(j)
                                 + w1 * region_sig[ix][iy][signalidy]->at(j+1);
-                        vec_sigy[indexy][k] += val;
+                        if (indexy >= 0 && indexy < N_STRIPS) vec_sigy[indexy][k] += val;
                         signalidy++;
                     }
                 }
+                librarySeconds += std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - libraryStart).count();
             } // end electron loop
         } // end cluster loop
         
         // —— 卷积 ——
+        const auto convolutionStart = std::chrono::steady_clock::now();
         for(int indexx = 0; indexx < N_STRIPS; ++indexx) {
             for (int k = 0; k < nTimeBins; ++k) {
                 double convx = 0;
                 double convy = 0;
-                for (int j = 0; j < k; ++j) {
+                for (int j = 0; j <= k; ++j) {
                     int idx = k - j;
                     convx += vec_sigx[indexx][idx] * kernel_vec[j];
                     convy += vec_sigy[indexx][idx] * kernel_vec[j];
@@ -461,6 +517,8 @@ int main(int argc, char *argv[])
                 vec_sigy_conv[indexx][k] = convy * tstep;
             }
         }
+        convolutionSeconds += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - convolutionStart).count();
         
         // —— 转换为输出格式：收集非零信号的 strip ——
         types.clear();
@@ -507,6 +565,23 @@ int main(int argc, char *argv[])
     fLib->Close();
     delete kernel;
 
-    std::cout << "\nDone! Output written to avalanchesample" << runid << ".root" << std::endl;
+    const double eventLoopSeconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - eventLoopStart).count();
+
+    std::cout << "\nSample-library acceptance:" << std::endl;
+    std::cout << "  primary electrons: " << nPrimary << std::endl;
+    std::cout << "  drift successful: " << nDriftSuccess << std::endl;
+    std::cout << "  readout in range: " << nReadoutInRange << std::endl;
+    std::cout << "  library (ix, iy) out of range: " << nLibraryOutOfRange << std::endl;
+    std::cout << "  empty library region: " << nEmptyRegion << std::endl;
+    std::cout << "  sampled electrons: " << nSampledElectrons << std::endl;
+    std::cout << "\nTiming (event loop): " << eventLoopSeconds << " s" << std::endl;
+    std::cout << "  DriftElectron: " << driftSeconds << " s"
+              << " (" << 100. * driftSeconds / eventLoopSeconds << "%)" << std::endl;
+    std::cout << "  template read + accumulation: " << librarySeconds << " s"
+              << " (" << 100. * librarySeconds / eventLoopSeconds << "%)" << std::endl;
+    std::cout << "  waveform convolution: " << convolutionSeconds << " s"
+              << " (" << 100. * convolutionSeconds / eventLoopSeconds << "%)" << std::endl;
+    std::cout << "Done! Output written to " << outputFile << std::endl;
     return 0;
 }

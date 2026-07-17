@@ -15,8 +15,8 @@
 
 // ---------- 全局参数 ----------
 const int    kNbins        = 10;       // 每维 10 个 bin，共 100 区域
-const double kEz1Target    = 0.01;     // 筛选 ez1 = 0.01
-const double kEz1Tolerance = 0.000001;    // 浮点容差
+const double kZ0Target    = 0.01;        // microTPC.C 中的单电子初始高度（cm）
+const double kZ0Tolerance = 0.000001;    // 浮点容差
 
 // ---- 信号通道名称表（8 个，与 microTPC.C 一致）----
 static const int n_sig = 8;
@@ -28,8 +28,8 @@ static const char* sig_name[n_sig] = {
 
 // ============================================================
 // buildSampleLibrary — 构建抽样库
-//   从 avalancheunit.root 读取 tree3/tree，
-//   按 ez1=0.01 筛选，用 ex1×ey2 分 100 区域，输出到 samplelibrarysmall.root
+//   从 microTPC.C 生成的 ROOT 文件读取 tree3/tree，
+//   按初始高度 z0=0.01 cm 筛选，用初始位置 x0×y0 分 100 区域，输出到 samplelibrarysmall.root
 // ============================================================
 void buildSampleLibrary(
     const char *inputFile  = "merged1.root",
@@ -50,18 +50,28 @@ void buildSampleLibrary(
         fin->Close();
         return;
     }
+    if (tree3->GetEntries() != tree1->GetEntries()) {
+        std::cerr << "Error: tree3 (" << tree3->GetEntries()
+                  << " entries) and tree (" << tree1->GetEntries()
+                  << " entries) are not aligned." << std::endl;
+        fin->Close();
+        return;
+    }
 
     // ----- 绑定 tree3 分支（用于分类）-----
-    // 与 microTPC.C 中 tree3 的分支一致：ex1, ey1, ez1, et1, ee1, it2
-    // 另读 ex2, ey2, ez2 等（如文件中存在的话）
+    // 与 microTPC.C 中 tree3 的分支一致：event, x0, y0, z0, t0, e0。
     double x0, y0, z0, t0, e0;
 
-    // 先尝试标准 microTPC.C 的分支
-    tree3->SetBranchAddress("x0", &x0);
-    tree3->SetBranchAddress("y0", &y0);
-    tree3->SetBranchAddress("z0", &z0);
-    tree3->SetBranchAddress("t0", &t0);
-    tree3->SetBranchAddress("e0", &e0);
+    if (tree3->SetBranchAddress("x0", &x0) < 0 ||
+        tree3->SetBranchAddress("y0", &y0) < 0 ||
+        tree3->SetBranchAddress("z0", &z0) < 0 ||
+        tree3->SetBranchAddress("t0", &t0) < 0 ||
+        tree3->SetBranchAddress("e0", &e0) < 0) {
+        std::cerr << "Error: tree3 does not have the x0/y0/z0/t0/e0 layout written by microTPC.C."
+                  << std::endl;
+        fin->Close();
+        return;
+    }
 
 
     // ----- 绑定 tree (tree1) 的分支 — 与 microTPC.C 完全一致 -----
@@ -74,16 +84,13 @@ void buildSampleLibrary(
     for (int is = 0; is < n_sig; ++is)
         tree1->SetBranchAddress(sig_name[is], &sig_in[is]);
 
-    // ----- 第一遍：扫描 tree2 收集满足 ez1=0.01 的条目 -----
+    // ----- 第一遍：扫描 tree3，收集固定初始高度 z0=0.01 cm 的条目 -----
     Long64_t nTotal = tree3->GetEntries();
-    std::vector<double>   vec_x0, vec_y0;
-    std::vector<Long64_t> vec_entry;  // 同时记录 entry 索引，便于后续读取 tree1/tree2 的信号数据
+    std::vector<Long64_t> valid_entries;
+    Long64_t nSkippedZ = 0;
 
     std::cout << "[buildSampleLibrary] Scanning " << nTotal
-              << " entries in tree3 for z0=" << kEz1Target << " ..." << std::endl;
-    int entry = 0;
-
-
+              << " entries in tree3 for z0=" << kZ0Target << " ..." << std::endl;
     double x_min = 0.056;
     double x_max = 0.064;
     double y_min = 0.04;
@@ -96,22 +103,24 @@ void buildSampleLibrary(
     std::vector<Long64_t> region_entries[kNbins][kNbins]; 
     for (Long64_t i = 0; i < nTotal; ++i) {
         tree3->GetEntry(i);
-        vec_x0.push_back(x0);
-        vec_y0.push_back(y0);
-        vec_entry.push_back(entry);
-
+        if (std::abs(z0 - kZ0Target) > kZ0Tolerance) {
+            ++nSkippedZ;
+            continue;
+        }
         int ix = (int)((x0 - x_min) / dx);
         int iy = (int)((y0 - y_min) / dy);
         if (ix < 0 || ix >= kNbins || iy < 0 || iy >= kNbins) {
-            std::cout << "Warning: Entry " << entry << " with (x0, y0) = (" << x0 << ", " << y0 << ") is out of bounds and will be ignored." << std::endl;
+            std::cout << "Warning: Entry " << i << " with (x0, y0) = (" << x0 << ", " << y0 << ") is out of bounds and will be ignored." << std::endl;
             continue;
         }
-        region_entries[ix][iy].push_back(entry);
-        entry++;
+        valid_entries.push_back(i);
+        region_entries[ix][iy].push_back(i);
     }
 
-    Long64_t nValid = vec_entry.size();
-    std::cout << "Found " << nValid << " valid entries." << std::endl;
+    Long64_t nValid = valid_entries.size();
+    std::cout << "Found " << nValid << " valid entries"
+              << " (skipped " << nSkippedZ << " with z0 outside "
+              << kZ0Target << " +/- " << kZ0Tolerance << " cm)." << std::endl;
     if (nValid == 0) { fin->Close(); return; }
 
     std::cout << "ex1 range: [" << x_min << ", " << x_max << "]" << std::endl;
@@ -140,8 +149,8 @@ void buildSampleLibrary(
     meta_nbins    = kNbins;
 
     // 读取第一条有效 entry，获取共享时间轴
-    tree3->GetEntry(vec_entry[0]);
-    tree1->GetEntry(vec_entry[0]);
+    tree3->GetEntry(valid_entries[0]);
+    tree1->GetEntry(valid_entries[0]);
     meta_t = t;
     meta->Fill();
     meta->Write();
@@ -157,6 +166,7 @@ void buildSampleLibrary(
             regiontree[i][j] = new TTree(Form("region_%d_%d", i, j), Form("Signals in region (%d, %d)", i, j));
             regiontree[i][j]->Branch("x0", &x0);
             regiontree[i][j]->Branch("y0", &y0);
+            regiontree[i][j]->Branch("z0", &z0);
             for (int is = 0; is < n_sig; ++is) {
                 regiontree[i][j]->Branch(sig_name[is], &sig_in[is]);}
         }
@@ -168,10 +178,8 @@ void buildSampleLibrary(
             if (entries.empty()) continue;
 
             std::cout << "Region (" << ix << ", " << iy << ") has " << entries.size() << " entries." << std::endl;
-            for (int j=0; j < entries.size(); ++j) {
+            for (size_t j = 0; j < entries.size(); ++j) {
                 Long64_t entryIdx = entries[j];
-                std::cout << "  Entry " << entryIdx << ": x0=" << vec_x0[entryIdx]
-                          << ", y0=" << vec_y0[entryIdx] << std::endl;
                 tree3->GetEntry(entryIdx);
                 tree1->GetEntry(entryIdx);
                 regiontree[ix][iy]->Fill();

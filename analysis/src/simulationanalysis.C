@@ -161,10 +161,13 @@ int main(){//分析模拟数据
     const bool useMatrixRoot = true;
     double scale = 4200; //这个是增益的缩放因子，主要用于将模拟信号的幅值调整到实际实验的范围内，确保反卷积和后续分析的准确性。不过目前只是反卷积矩阵有这个
     DeconvCuts m_cuts;
+    m_cuts.n_tier = n_tier;
+    m_cuts.thickness = thickness;
+    m_cuts.z_ref_position = thickness / 2.0;
     m_cuts.clusterMinEnergy[0] = 0;
     m_cuts.clusterMinEnergy[1] = 0;
     m_cuts.apvsamples = n_sig_samples;
-    m_cuts.clusterMinMaxAmp = 1000000;
+    m_cuts.clusterMinMaxAmp = 0;
     m_cuts.clusterChi2ReLimit = 10000;
     m_cuts.clusterMinTierCharge = 0;
     double stripchargecut = 0;
@@ -193,11 +196,21 @@ int main(){//分析模拟数据
         tmatrix->SetBranchAddress("sigy_conv", &sigy_conv);
 
         std::vector<std::vector<double>> sigzero_samples[2];  // [0]=X方向5层, [1]=Y方向5层
+        if (tmatrix->GetEntries() < n_tier) {
+            std::cerr << "Error: matrix_tree has fewer than " << n_tier << " templates" << std::endl;
+            return 0;
+        }
         for (int entry = 0; entry < n_tier; entry++) {
             tmatrix->GetEntry(entry);
+            if (!sigx_conv || !sigy_conv ||
+                sigx_conv->size() < static_cast<size_t>(n_sig_samples * 5) ||
+                sigy_conv->size() < static_cast<size_t>(n_sig_samples * 5)) {
+                std::cerr << "Error: invalid template size at matrix entry " << entry << std::endl;
+                return 0;
+            }
             std::vector<double> sig_temp[2];
             for(int i=0;i<sigx_conv->size();i++){
-              if(i%5==0 && i < n_sig_samples*5-1){  // 每5个采样点对应一个层，截断到 n_sig_samples
+              if(i%5==0 && i < n_sig_samples*5){  // 每5个采样点对应一个层，截断到 n_sig_samples
                 sig_temp[0].push_back((*sigx_conv)[i]*scale);
                 sig_temp[1].push_back(-(*sigy_conv)[i]*scale);
               }
@@ -208,12 +221,6 @@ int main(){//分析模拟数据
         fmatrix->Close();
         deconvMatrix[0] = AnalysisUtils::DeconvBaseMatrix(sigzero_samples[0], n_sig_samples);
         deconvMatrix[1] = AnalysisUtils::DeconvBaseMatrix(sigzero_samples[1], n_sig_samples);
-        for(int i=0;i<deconvMatrix[0].rows();i++){
-          for(int j=0;j<deconvMatrix[0].cols();j++){
-            std::cout << deconvMatrix[1](i,j) << " ";
-          }
-          std::cout << std::endl;
-        }
     // } else {
     //     // ----- 方案 B: 传统单模板 + Toeplitz 移位矩阵 -----
     //     std::cout << "[Phase 1] Using gain_and_mean_sample.root (single template + shift)" << std::endl;
@@ -341,6 +348,28 @@ int main(){//分析模拟数据
     
     TDirectory *dir_correlation = fout->mkdir("correlation");
     TDirectory *dir_correlation_one[2] = {dir_correlation->mkdir("correlation_one_x"), dir_correlation->mkdir("correlation_one_y")};
+    TDirectory *dir_residual_diagnostics = dir_correlation->mkdir("residual_diagnostics");
+
+    // X 分层残差诊断：区分仅要求 X 有单 cluster 与同时要求 X/Y 有单 cluster，
+    // 并在通常的 X/Y 单 cluster 样本中按本层电荷的高低各取一半。
+    TH1D *h_res_xonly[n_tier];
+    TH1D *h_res_charge_low[n_tier];
+    TH1D *h_res_charge_high[n_tier];
+    std::vector<std::pair<double, double>> res_charge_x[n_tier]; // (residual [mm], tier charge)
+    for (int tier = 0; tier < n_tier; ++tier) {
+      h_res_xonly[tier] = new TH1D(
+          Form("h_res_xonly_tier_%d", tier),
+          Form("X residual, X-only single-cluster selection, tier %d;residual [mm];entries", tier),
+          200, -1, 1);
+      h_res_charge_low[tier] = new TH1D(
+          Form("h_res_x_lowcharge_tier_%d", tier),
+          Form("X residual, lower half of tier charge, tier %d;residual [mm];entries", tier),
+          200, -1, 1);
+      h_res_charge_high[tier] = new TH1D(
+          Form("h_res_x_highcharge_tier_%d", tier),
+          Form("X residual, upper half of tier charge, tier %d;residual [mm];entries", tier),
+          200, -1, 1);
+    }
 
 
     std::vector<double> res_arr[2][n_tier];
@@ -362,6 +391,10 @@ int main(){//分析模拟数据
             std::cerr << "Error: Null branch pointer after GetEntry — check branch names in test.root" << std::endl;
             continue;
         }
+        if (waveforms->size() != types->size() || waveforms->size() != stripIDs->size()) {
+            std::cerr << "Error: inconsistent strip branch sizes in event " << event << std::endl;
+            continue;
+        }
         for(int i = 0; i < types->size(); i++){
             std::vector<double> waveform1 = waveforms->at(i);
             std::vector<double> waveform;
@@ -377,9 +410,14 @@ int main(){//分析模拟数据
                 continue;
             }
             for(int j = 0; j < waveform1.size(); j++) {
-              if(j%5==0 && j < n_sig_samples*5-1){
+              if(j%5==0 && j < n_sig_samples*5){
                 waveform.push_back(waveform1[j]*1000);
               }
+            }
+            if (waveform.size() != static_cast<size_t>(n_sig_samples)) {
+                std::cerr << "Warning: sampled waveform has " << waveform.size()
+                          << " points for strip ID " << stripID << std::endl;
+                continue;
             }
 
             StripHitDeconv sh;
@@ -471,20 +509,33 @@ int main(){//分析模拟数据
         ClusterStripHits(vec_StripHitDeconv_temp[type], nullptr, m_cuts, event, type,
                          hasCluster[type], vec_ClusterDeconv_temp);
       }
-      ClusterDeconvs = vec_ClusterDeconv_temp;
+      ClusterDeconvs.clear();
       std::vector<ClusterDeconv> ClusterDeconvs_one[2];
-      for(const auto& cluster : ClusterDeconvs) {
+      for(const auto& cluster : vec_ClusterDeconv_temp) {
+        if (!cluster.isValid) continue;
+        ClusterDeconvs.push_back(cluster);
         clusternum[cluster.type]++;
         ClusterDeconvs_one[cluster.type].push_back(cluster);
       }
 
+      // 对照 1：仅要求 X 方向有一个有效 cluster，不对 Y 重建施加选择。
+      if (clusternum[0] == 1) {
+        const ClusterDeconv &clusterX = ClusterDeconvs_one[0][0];
+        for (int tier = 0; tier < n_tier; ++tier) {
+          if (!std::isfinite(clusterX.pos[tier])) continue;
+          const double res = clusterX.pos[tier] * 0.4 + 0.2
+              - b[0] * 10.0
+              - k[0] * thickness / n_tier * (tier + 0.5);
+          h_res_xonly[tier]->Fill(res);
+        }
+      }
 
       //analysis and draw the events with only one cluster in each direction
 
       if(clusternum[0] == 1&& clusternum[1] == 1) {
         for(int type = 0;type < 2;type++){
-          TH2D *h_waveform_one = new TH2D(Form("h_waveform_one_type_%d", type), Form("h_waveform_one_type_%d", type), 10, 0, 10, n_sig_samples, 0, n_sig_samples);
-          TH2D *h_charge_one = new TH2D(Form("h_charge_one_type_%d", type), Form("h_charge_one_type_%d", type), 10, 0, 10, n_tier, 0, thickness);                
+          TH2D *h_waveform_one = new TH2D(Form("h_waveform_one_type_%d", type), Form("h_waveform_one_type_%d", type), 20, 0, 20, n_sig_samples, 0, n_sig_samples);
+          TH2D *h_charge_one = new TH2D(Form("h_charge_one_type_%d", type), Form("h_charge_one_type_%d", type), 20, 0, 20, n_tier, 0, thickness);
           TGraph *gr_hit = new TGraph();
           gr_hit->SetName(Form("gr_track_type_%d", type));
           gr_hit->SetTitle(Form("gr_track_type_%d", type));
@@ -523,6 +574,9 @@ int main(){//分析模拟数据
               gr_position->SetPointError(gr_position->GetN(), sqrt(thickness/n_tier*(tier+0.5)/cluster.chargetier[tier]*1000), 0);
               res_arr[cluster.type][tier].push_back(res);
               h_res[cluster.type][tier]->Fill(res);
+              if (cluster.type == 0) {
+                res_charge_x[tier].emplace_back(res, cluster.chargetier[tier]);
+              }
             }
 
             double predk = cluster.k;
@@ -582,41 +636,42 @@ int main(){//分析模拟数据
     }
     std::cout << "Simulation analysis completed." << std::endl;
 
-    double sum_res2[2][n_tier][n_tier] = {{{0}}};
+    // 每个 tier 对只使用两者均有效的同一批 event 计算协方差。
+    double sum_i[2][n_tier][n_tier] = {{{0}}};
+    double sum_j[2][n_tier][n_tier] = {{{0}}};
+    double sum_i2[2][n_tier][n_tier] = {{{0}}};
+    double sum_j2[2][n_tier][n_tier] = {{{0}}};
+    double sum_ij[2][n_tier][n_tier] = {{{0}}};
     int count[2][n_tier][n_tier] = {{{0}}};
-    double mean[2][n_tier] = {{0}};
-    int count_mean[2][n_tier] = {{0}};
 
     for(int type = 0; type < 2; ++type) {
       for(int i = 0; i < res_arr[type][0].size(); ++i) {
         for(int tier = 0; tier < n_tier; ++tier) {
-          double res1 = res_arr[type][tier][i];
-          if(res1 == std::numeric_limits<double>::infinity()) continue;
-          mean[type][tier] += res1;
-          count_mean[type][tier]++;
           for(int tier2 = tier; tier2 < n_tier; ++tier2){
-            double res2 = res_arr[type][tier2][i];
-            if(res2 == std::numeric_limits<double>::infinity()) continue;
-            sum_res2[type][tier][tier2] += res1 * res2;
+            const double res1 = res_arr[type][tier][i];
+            const double res2 = res_arr[type][tier2][i];
+            if(!std::isfinite(res1) || !std::isfinite(res2)) continue;
+            sum_i[type][tier][tier2] += res1;
+            sum_j[type][tier][tier2] += res2;
+            sum_i2[type][tier][tier2] += res1 * res1;
+            sum_j2[type][tier][tier2] += res2 * res2;
+            sum_ij[type][tier][tier2] += res1 * res2;
             count[type][tier][tier2]++;
           }
         }
       }
 
-      for(int tier = 0; tier < n_tier; ++tier) {
-        if(count_mean[type][tier] > 0) {
-          mean[type][tier] /= count_mean[type][tier];
-          sum_res2[type][tier][tier] = sum_res2[type][tier][tier]/count[type][tier][tier]-mean[type][tier]*mean[type][tier];
-        }
-      }
-
       for(int tier = 0; tier < n_tier; ++tier) {     
-        h_correlation[type]->SetBinContent(tier+1, tier+1, 1.0);  // 对角线为1
-        h_cov[type]->SetBinContent(tier+1, tier+1, sum_res2[type][tier][tier]);  // 对角线为方差
-        for(int tier2 = tier+1; tier2 < n_tier; ++tier2) {
+        for(int tier2 = tier; tier2 < n_tier; ++tier2) {
           if(count[type][tier][tier2] > 0) {
-            double cov = sum_res2[type][tier][tier2] / count[type][tier][tier2] - mean[type][tier] * mean[type][tier2];
-            double corr = cov / (sqrt(sum_res2[type][tier][tier]) * sqrt(sum_res2[type][tier2][tier2] ));
+            const double n = count[type][tier][tier2];
+            const double mean_i = sum_i[type][tier][tier2] / n;
+            const double mean_j = sum_j[type][tier][tier2] / n;
+            const double cov = sum_ij[type][tier][tier2] / n - mean_i * mean_j;
+            const double var_i = sum_i2[type][tier][tier2] / n - mean_i * mean_i;
+            const double var_j = sum_j2[type][tier][tier2] / n - mean_j * mean_j;
+            const double corr = (var_i > 0.0 && var_j > 0.0)
+                ? cov / std::sqrt(var_i * var_j) : 0.0;
             h_cov[type]->SetBinContent(tier+1, tier2+1, cov);
             h_cov[type]->SetBinContent(tier2+1, tier+1, cov);  // 对称矩阵
             h_correlation[type]->SetBinContent(tier+1, tier2+1, corr);
@@ -624,6 +679,30 @@ int main(){//分析模拟数据
           }
         }
       }
+    }
+
+    // 对照 2：按每层电荷排序，低/高各保留一半，避免硬编码电荷阈值。
+    for (int tier = 0; tier < n_tier; ++tier) {
+      auto ordered = res_charge_x[tier];
+      std::sort(ordered.begin(), ordered.end(),
+                [](const auto &lhs, const auto &rhs) { return lhs.second < rhs.second; });
+      const size_t split = ordered.size() / 2;
+      for (size_t i = 0; i < ordered.size(); ++i) {
+        if (i < split) h_res_charge_low[tier]->Fill(ordered[i].first);
+        else h_res_charge_high[tier]->Fill(ordered[i].first);
+      }
+      if (!ordered.empty()) {
+        const double boundary = ordered[split].second;
+        std::cout << "X tier " << tier << " charge split: " << boundary
+                  << " (low/high entries " << split << "/"
+                  << ordered.size() - split << ")" << std::endl;
+      }
+      dir_residual_diagnostics->WriteTObject(h_res_xonly[tier]);
+      dir_residual_diagnostics->WriteTObject(h_res_charge_low[tier]);
+      dir_residual_diagnostics->WriteTObject(h_res_charge_high[tier]);
+      delete h_res_xonly[tier];
+      delete h_res_charge_low[tier];
+      delete h_res_charge_high[tier];
     }
 
 
@@ -644,4 +723,3 @@ int main(){//分析模拟数据
     delete fin;
     return 0;
 }
-
