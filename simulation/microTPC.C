@@ -29,7 +29,6 @@
 #include "Garfield/ViewField.hh"
 #include "Garfield/ViewSignal.hh"
 
-
 using namespace Garfield;
 
 int main(int argc, char *argv[]) {
@@ -99,15 +98,12 @@ int main(int argc, char *argv[]) {
   // fm.CopyWeightingPotential("ylabel+2", ylabel, 0, 2.*pitch, 0, 0, 0, 0);
 
   // Dimensions of the microTPC [cm]
-
   fm.SetGas(&gas);
   fm.PrintMaterials();
 
   ViewField fieldView(&fm);
   ViewFEMesh meshView(&fm);
   constexpr bool plotField = false;
-
-
 
   // Create the sensor.
   Sensor sensor(&fm);
@@ -217,9 +213,11 @@ int main(int argc, char *argv[]) {
     sigzero_after_conv.clear();
     sigy_after_conv.clear();
     sigtest1.clear();
+    sigtest2.clear();
     sigtestminus2.clear();
     sigtestminu1.clear();
     sigtest1_after_conv.clear();
+    sigtest2_after_conv.clear();
     sigtestminus2_after_conv.clear();
     sigtestminu1_after_conv.clear();
     sigytest1.clear();

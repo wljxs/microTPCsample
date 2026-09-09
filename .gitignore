@@ -1,5 +1,10 @@
 # ROOT data and generated analysis output
 *.root
+simulation/result/
+simulation/analysis/__pycache__/
+simulation/analysis/*_C.d
+simulation/analysis/*_C.so
+simulation/analysis/*_C_ACLiC_dict_rdict.pcm
 
 # CMake build products
 **/build/

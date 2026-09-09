@@ -34,6 +34,14 @@ target_link_libraries(microTPC  Garfield::Garfield ElectronDict Eigen3::Eigen RO
 add_executable(microTPCsimulation microTPCsimulation.C)
 target_link_libraries(microTPCsimulation  Garfield::Garfield ElectronDict Eigen3::Eigen ROOT::RIO ROOT::Net ROOT::Hist ROOT::Tree)
 
+add_executable(microTPCsample microTPCsample.C)
+target_link_libraries(microTPCsample  Garfield::Garfield ElectronDict Eigen3::Eigen ROOT::RIO ROOT::Net ROOT::Hist ROOT::Tree)
+
+add_executable(microTPCsimulationxray microTPCsimulationxray.C)
+target_link_libraries(microTPCsimulationxray  Garfield::Garfield ElectronDict Eigen3::Eigen ROOT::RIO ROOT::Net ROOT::Hist ROOT::Tree)
+
+add_executable(gas gas.C)
+target_link_libraries(gas  Garfield::Garfield ElectronDict Eigen3::Eigen ROOT::RIO ROOT::Net ROOT::Hist ROOT::Tree)
 
 # ---Copy all files locally to the build directory-------------------------------
 # set(Detector microTPC)

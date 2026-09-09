@@ -1,0 +1,48 @@
+{
+    // APV25 第1组模拟结果的输出目录。
+    "outputDir": "../result/apv25_1",
+
+    // 模拟波形总时间，单位 ns。
+    "totalTime": 700.0,
+
+    "simulation": {
+        // 运行编号和事例数。
+        "runid": 0,
+        "nEvents": 1000,
+
+        // 探测器文件夹；相对路径以 simulation/build 为基准。
+        "detectorDir": "../microTPC5mmone",
+
+        // 气体文件和电场文件；相对于 detectorDir。
+        "gasFile": "ar_45_cf4_40_co2_15100-100000.gas",
+        "fieldFile": "field.txt",
+
+        // 入射极角和方位角，单位 degree。
+        "theta": 20.0,
+        "phi": 90.0,
+
+        // 随机数种子。
+        "seed": 42,
+
+        // 入射位置模式："center" 或 "uniform"。
+        "mode": "center",
+
+        // 是否启用 delta 电子输运。
+        "deltaElectron": false,
+
+        // 模拟波形采样间隔，单位 ns。
+        "sampleInterval": 5.0,
+
+        // 漂移区上边界 z0，单位 cm。
+        "gap": 0.5
+    },
+
+    "electronics": {
+        // APV25 成形参数。
+        "n": 1,
+        "tau": 50.0,
+
+        // APV25 采样间隔，单位 ns。
+        "sampleInterval": 25.0
+    }
+}

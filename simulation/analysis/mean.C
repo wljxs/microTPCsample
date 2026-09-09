@@ -4,16 +4,21 @@
 #include <ios>
 #include <iostream>
 #include <TGraph.h>
+#include <TParameter.h>
 #include <vector>
-void mean(int num = 0){
-    TString inputFile = TString::Format("../build/tiersimulation/tier%d.root", num);
-    TString outputFile = TString::Format("mean%d.root", num);
+void mean(int num = 0,
+          TString inputDir = "../build/tiersimulation",
+          TString outputDir = "."){
+    gSystem->mkdir(outputDir, true);
+    TString inputFile = TString::Format("%s/tier%d.root", inputDir.Data(), num);
+    TString outputFile = TString::Format("%s/mean%d.root", outputDir.Data(), num);
     TFile *fin = TFile::Open(inputFile, "READ");
     if (!fin || fin->IsZombie()) {
         std::cerr << "Failed to open file" << std::endl;
         return;
     }
     TTree *tree = (TTree *)fin->Get("tree");
+    auto *templateZ = (TParameter<double> *)fin->Get("templateZ");
     if (!tree) {
         std::cerr << "Failed to get tree" << std::endl;
         return;
@@ -90,6 +95,10 @@ void mean(int num = 0){
     fout->WriteTObject(gry, "mean_sigy");
     fout->WriteTObject(grx_conv, "mean_sigx_conv");
     fout->WriteTObject(gry_conv, "mean_sigy_conv");
+    if (templateZ) {
+        TParameter<double> outputTemplateZ("templateZ", templateZ->GetVal());
+        outputTemplateZ.Write();
+    }
 
     tout->Fill();
     fin->Close();

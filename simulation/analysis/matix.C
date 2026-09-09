@@ -1,127 +1,146 @@
-// matrix.C
-// 功能：
-//   1. 统计当前目录下 mean*.root 文件的个数
-//   2. 将每个文件中卷积好的两个方向信号 (sigzero, sigy) 汇集到 std::vector<std::vector<double>>
-//   3. 将文件个数和信号矩阵存入一个 TTree
-
+#include <TCanvas.h>
+#include <TColor.h>
 #include <TFile.h>
-#include <TTree.h>
+#include <TGraph.h>
+#include <TLegend.h>
+#include <TMultiGraph.h>
+#include <TParameter.h>
+#include <TStyle.h>
 #include <TSystem.h>
+#include <TTree.h>
+
+#include <algorithm>
+#include <cmath>
 #include <iostream>
+#include <limits>
 #include <vector>
-#include <string>
 
-void matrix() {
-    // ============================================================
-    // Step 1: 统计当前目录下 mean*.root 文件的个数
-    // ============================================================
-    // 方法：从 0 开始递增尝试打开 mean%d.root，直到文件不存在
-    std::vector<int> fileIndices;
-    int idx = 0;
-    while (true) {
-        TString fname = TString::Format("mean%d.root", idx);
-        if (gSystem->AccessPathName(fname)) {
-            // AccessPathName 返回非0表示文件不存在
-            break;
-        }
-        fileIndices.push_back(idx);
-        idx++;
+void matrix(TString inputDir = ".", TString outputFile = "matrix.root") {
+    // mean 文件必须从 mean0.root 开始连续编号。
+    int nFiles = 0;
+    while (!gSystem->AccessPathName(
+        TString::Format("%s/mean%d.root", inputDir.Data(), nFiles))) {
+        ++nFiles;
     }
-
-    int nFiles = (int)fileIndices.size();
-    std::cout << "========================================" << std::endl;
-    std::cout << "  找到 " << nFiles << " 个 mean root 文件: " << std::endl;
-    for (int i = 0; i < nFiles; i++) {
-        std::cout << "    mean" << fileIndices[i] << ".root" << std::endl;
-    }
-    std::cout << "========================================" << std::endl;
 
     if (nFiles == 0) {
-        std::cerr << "错误: 当前目录下没有找到 mean*.root 文件!" << std::endl;
+        std::cerr << "没有找到 mean*.root 文件。" << std::endl;
         return;
     }
 
-    // ============================================================
-    // Step 2: 读取每个文件的卷积信号，汇集到 vector<vector<double>>
-    // ============================================================
-    // sigx_all[i] = 第 i 个文件的 sigzero (x方向卷积信号)
-    // sigy_all[i] = 第 i 个文件的 sigy    (y方向卷积信号)
-    std::vector<std::vector<double>> sigx_all;
-    std::vector<std::vector<double>> sigy_all;
+    TFile output(outputFile, "RECREATE");
+    TTree matrixTree("matrix_tree", "Matrix of convolved signals");
 
-    for (int i = 0; i < nFiles; i++) {
-        TString fname = TString::Format("mean%d.root", fileIndices[i]);
-        TFile *fin = TFile::Open(fname, "READ");
-        if (!fin || fin->IsZombie()) {
-            std::cerr << "警告: 无法打开 " << fname << ", 跳过." << std::endl;
-            continue;
+    int fileIndex = 0;
+    double template_z_mm = 0.;
+    std::vector<double> sigx_conv;
+    std::vector<double> sigy_conv;
+
+    matrixTree.Branch("nFiles", &nFiles);
+    matrixTree.Branch("fileIndex", &fileIndex);
+    matrixTree.Branch("template_z_mm", &template_z_mm);
+    matrixTree.Branch("sigx_conv", &sigx_conv);
+    matrixTree.Branch("sigy_conv", &sigy_conv);
+
+    TMultiGraph meanX;
+    TMultiGraph meanY;
+    meanX.SetTitle("X direction;Time (ns);Mean signal");
+    meanY.SetTitle("Y direction;Time (ns);Mean signal");
+
+    TLegend legendX(0.62, 0.65, 0.89, 0.89);
+    TLegend legendY(0.62, 0.65, 0.89, 0.89);
+    legendX.SetBorderSize(0);
+    legendY.SetBorderSize(0);
+
+    std::vector<TGraph*> graphs;
+    gStyle->SetPalette(kRainBow);
+
+    for (fileIndex = 0; fileIndex < nFiles; ++fileIndex) {
+        const TString filename = TString::Format(
+            "%s/mean%d.root", inputDir.Data(), fileIndex);
+        TFile input(filename, "READ");
+        auto* meanTree = static_cast<TTree*>(input.Get("tree_mean"));
+
+        if (input.IsZombie() || !meanTree) {
+            std::cerr << "无法读取 " << filename << std::endl;
+            return;
         }
 
-        TTree *tree = (TTree *)fin->Get("tree_mean");
-        if (!tree) {
-            std::cerr << "警告: " << fname << " 中没有 tree_mean, 跳过." << std::endl;
-            fin->Close();
-            continue;
+        std::vector<double>* t = nullptr;
+        std::vector<double>* sigzero = nullptr;
+        std::vector<double>* sigy = nullptr;
+        meanTree->SetBranchAddress("t", &t);
+        meanTree->SetBranchAddress("sigzero", &sigzero);
+        meanTree->SetBranchAddress("sigy", &sigy);
+        meanTree->GetEntry(0);
+
+        if (!t || !sigzero || !sigy) {
+            std::cerr << filename << " 中的平均波形为空。" << std::endl;
+            return;
         }
 
-        // 绑定分支 (注意: mean.C 中卷积信号分支名为 sigzero 和 sigy)
-        std::vector<double> *sigx_conv = nullptr;
-        std::vector<double> *sigy_conv = nullptr;
-        tree->SetBranchAddress("sigzero", &sigx_conv);
-        tree->SetBranchAddress("sigy",    &sigy_conv);
+        sigx_conv = *sigzero;
+        sigy_conv = *sigy;
 
-        tree->GetEntry(0);  // tree_mean 只有 1 个 entry
+        auto* sourceZ = static_cast<TParameter<double>*>(
+            input.Get("templateZ"));
+        template_z_mm = sourceZ
+            ? sourceZ->GetVal() * 10.
+            : std::numeric_limits<double>::quiet_NaN();
 
-        // 将信号向量存入二维矩阵
-        sigx_all.push_back(*sigx_conv);
-        sigy_all.push_back(*sigy_conv);
+        const size_t nPoints = std::min({
+            t->size(), sigzero->size(), sigy->size()});
+        if (nPoints == 0) {
+            std::cerr << filename << " 中没有可绘制的点。" << std::endl;
+            return;
+        }
 
-        std::cout << "  读取 " << fname << ": sigzero 长度 = " << sigx_conv->size()
-                  << ", sigy 长度 = " << sigy_conv->size() << std::endl;
+        const int colorIndex = nFiles == 1
+            ? 0
+            : fileIndex * (TColor::GetNumberOfColors() - 1) / (nFiles - 1);
+        const int color = TColor::GetColorPalette(colorIndex);
 
-        fin->Close();
+        auto* graphX = new TGraph(
+            static_cast<int>(nPoints), t->data(), sigzero->data());
+        auto* graphY = new TGraph(
+            static_cast<int>(nPoints), t->data(), sigy->data());
+        graphX->SetLineColor(color);
+        graphY->SetLineColor(color);
+        graphX->SetLineWidth(2);
+        graphY->SetLineWidth(2);
+        meanX.Add(graphX, "L");
+        meanY.Add(graphY, "L");
+        graphs.push_back(graphX);
+        graphs.push_back(graphY);
+
+        const TString label = std::isfinite(template_z_mm)
+            ? TString::Format("tier %d, z = %.3f mm", fileIndex, template_z_mm)
+            : TString::Format("tier %d", fileIndex);
+        legendX.AddEntry(graphX, label, "l");
+        legendY.AddEntry(graphY, label, "l");
+
+        matrixTree.Fill();
+        std::cout << "读取 " << filename << std::endl;
     }
 
-    int nActualFiles = (int)sigx_all.size();
-    std::cout << "  成功读取 " << nActualFiles << " 个文件的卷积信号." << std::endl;
+    output.cd();
+    matrixTree.Write();
 
-    // ============================================================
-    // Step 3: 将信息存入 TTree
-    // ============================================================
-    // TTree 设计:
-    //   - 每个 entry 对应一个 mean 文件
-    //   - 分支: nFiles      (Int_t)        文件总数 (每个 entry 值相同)
-    //   - 分支: fileIndex   (Int_t)        原始文件编号
-    //   - 分支: sigx_conv   (vector<double>)  x 方向卷积信号
-    //   - 分支: sigy_conv   (vector<double>)  y 方向卷积信号
+    TCanvas canvas("meanWaveforms", "Mean waveforms", 1200, 600);
+    canvas.Divide(2, 1);
+    canvas.cd(1);
+    gPad->SetGrid();
+    meanX.Draw("A");
+    legendX.Draw();
+    canvas.cd(2);
+    gPad->SetGrid();
+    meanY.Draw("A");
+    legendY.Draw();
+    canvas.Write();
 
-    TFile *fout = new TFile("matrix.root", "RECREATE");
-    TTree *tout = new TTree("matrix_tree", "Matrix of convolved signals from mean files");
-
-    // 需要在 Fill 前设置分支，且每个 entry 更新这些变量
-    Int_t   nFiles_branch = nActualFiles;
-    Int_t   fileIndex;
-    std::vector<double> sigx_vec;
-    std::vector<double> sigy_vec;
-
-    tout->Branch("nFiles",    &nFiles_branch, "nFiles/I");
-    tout->Branch("fileIndex", &fileIndex,     "fileIndex/I");
-    tout->Branch("sigx_conv", &sigx_vec);
-    tout->Branch("sigy_conv", &sigy_vec);
-
-    for (int i = 0; i < nActualFiles; i++) {
-        fileIndex = fileIndices[i];
-        sigx_vec  = sigx_all[i];
-        sigy_vec  = sigy_all[i];
-        tout->Fill();
-    }
-
-    fout->Write();
-    fout->Close();
-
-    std::cout << "========================================" << std::endl;
-    std::cout << "  输出文件: matrix.root" << std::endl;
-    std::cout << "  TTree: matrix_tree, 共 " << nActualFiles << " entries" << std::endl;
-    std::cout << "  分支: nFiles, fileIndex, sigx_conv, sigy_conv" << std::endl;
-    std::cout << "========================================" << std::endl;
+    for (auto* graph : graphs) delete graph;
+    std::cout << "已生成 " << outputFile
+              << "，共 " << nFiles
+              << " 层，平均波形画布已写入 meanWaveforms。"
+              << std::endl;
 }
